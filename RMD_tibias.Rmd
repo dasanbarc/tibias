@@ -1,0 +1,503 @@
+---
+title: "Tibias"
+author: "Joan Vilanova - David Sánchez"
+date: 'Junio 2022'
+output:
+  html_document:
+    highlight: default
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    highlight: zenburn
+    toc: yes
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+Queremos evaluar si hay un patrón de fractura tibial (AO) que se relacione más con las fracturas del maléolo posterior y si el patrón se relaciona con la energía del mecanismo de fractura (alta energía o no) y/o con la afectación de las partes blandas (fractura abierta o no).
+
+
+
+# Preprocesado y gestión de características
+
+```{r message= FALSE, warning=FALSE}
+if (!require('readxl')) install.packages('readxl')
+library(readxl)
+if (!require('dplyr')) install.packages('dplyr')
+library(dplyr)
+if (!require('ggplot2')) install.packages('ggplot2')
+library(ggplot2)
+if (!require('arules')) install.packages('arules')
+library(arules)
+if (!require("gridExtra")) install.packages("gridExtra")
+library("gridExtra")
+if (!require("ggmosaic")) install.packages("ggmosaic")
+library(ggmosaic)
+```
+
+Cargo el archivo. 
+```{r message= FALSE, warning=FALSE}
+path_tibias <- 'tibias.xlsx'
+
+tibias <- suppressMessages(read_excel(path_tibias, col_names = TRUE)[,5:12])
+names(tibias) <- c('Sexo', 'Edad', 'AO1', 'AO2', 'AO3', 'Fx_abierta', 'Alta_energía', 'Afectación_MP')
+str(tibias)
+```
+
+Defino sus columnas:
+  - Sexo: 0 mujer, 1 hombre.
+  - Edad: edad en años.
+  - AO1: 41 tibia proximal, 42 tibia diafisaria, 43 tibia distal.
+  - AO2: A, B, C. Falta completar definición.
+  - AO3: 1, 2, 3. Falta completar definición.
+  - Fx_abierta: indica si hay o no afectación cutánea.
+  - Alta_energía: traumatismo de alta energía; 0 no, 1 sí.
+  - Afectación_MP: afectación del maléolo posterior; 0 no, 1 sí.
+  
+
+Resumen estadístico:
+```{r message= FALSE, warning=FALSE}
+summary(tibias)
+```
+
+Busco valores nulos.
+```{r message= FALSE, warning=FALSE}
+print('Nulos (NA)')
+colSums(is.na(tibias))
+```
+
+Identifico valores NA.
+```{r message= FALSE, warning=FALSE}
+tibias[is.na(tibias$Edad),]
+```
+
+Elimino todas las filas con Edad == NA (el resto de columnas también están vacías).
+```{r message= FALSE, warning=FALSE}
+tibias <- tibias[!is.na(tibias$Edad),]
+```
+
+Busco valores nulos de nuevo.
+```{r message= FALSE, warning=FALSE}
+print('Nulos (NA)')
+colSums(is.na(tibias))
+```
+
+Elimino la fila con NA en campo Afectación_MP, ya que es la variable objetivo.
+```{r message= FALSE, warning=FALSE}
+tibias <- tibias[!is.na(tibias$Afectación_MP),]
+```
+
+Confirmo que no quedan valores nulos.
+```{r message= FALSE, warning=FALSE}
+print('Nulos (NA)')
+colSums(is.na(tibias))
+```
+
+Busco valores en blanco. No los hay.
+```{r message= FALSE, warning=FALSE}
+print('Valores en blanco')
+colSums(tibias == "")
+```
+
+Renombro las clases por nombres más intuitivos.
+```{r message= FALSE, warning=FALSE}
+tibias[tibias$Sexo == 0, 'Sexo'] = 'Mujer'
+tibias[tibias$Sexo == 1, 'Sexo'] = 'Hombre'
+
+tibias[tibias$Alta_energía == 0, 'Alta_energía'] = 'No'
+tibias[tibias$Alta_energía == 1, 'Alta_energía'] = 'Sí'
+
+tibias[tibias$Afectación_MP == 0, 'Afectación_MP'] = 'No'
+tibias[tibias$Afectación_MP == 1, 'Afectación_MP'] = 'Sí'
+
+tibias[tibias$Fx_abierta == 'NO', 'Fx_abierta'] = 'No'
+tibias[tibias$Fx_abierta == 'Si - G.I (<1cm)', 'Fx_abierta'] = 'Sí - G.I (<1cm)'
+tibias[tibias$Fx_abierta == 'Si - G.II (1-10cm)', 'Fx_abierta'] = 'Sí - G.II (1-10cm)'
+```
+
+Creo una nueva columna, AO, con los campos AO1 - AO2 - AO3 unidos en un string.
+```{r message= FALSE, warning=FALSE}
+tibias <- tibias %>% mutate(AO = paste(as.character(AO1), AO2, as.character(AO3), sep=''))
+```
+
+Creo una nueva columna, Edad_f, con las franjas de edad.
+```{r message= FALSE, warning=FALSE}
+tibias <- tibias %>% mutate(Edad_f = discretize(tibias$Edad, method = 'fixed', breaks = c(10, 20, 30, 40, 50, 60, 70, 80, 90),
+                                                labels = c('10-19 a',
+                                                           '20-29 a',
+                                                           '30-39 a',
+                                                           '40-49 a',
+                                                           '50-59 a',
+                                                           '60-69 a',
+                                                           '70-79 a',
+                                                           '80-89 a')))
+```
+
+Transformo las variables categóricas en factores.
+```{r message= FALSE, warning=FALSE}
+tibias <- tibias %>% mutate(Sexo=as.factor(Sexo), Fx_abierta=as.factor(Fx_abierta),
+                            AO1=as.factor(AO1), AO2=as.factor(AO2), AO3=as.factor(AO3),
+                            Alta_energía=as.factor(Alta_energía), Afectación_MP=as.factor(Afectación_MP),
+                            AO=as.factor(AO), Edad_f=as.factor(Edad_f))
+str(tibias)
+```
+
+Confirmo la correcta clasificación de la edad en franjas.
+```{r}
+tibias[,c('Edad', "Edad_f")]
+```
+
+
+
+# Análisis de los datos
+
+Visualizo las diferentes variables según sexo.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(Sexo, fill = Afectación_MP)) +
+  xlab('Sexo') +
+  ylab('Recuento') +
+  ggtitle('Sexo y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(Sexo, fill = Fx_abierta)) +
+  xlab('Sexo') +
+  ylab('Recuento') +
+  ggtitle('Sexo y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(Sexo, fill = Alta_energía)) +
+  xlab('Sexo') +
+  ylab('Recuento') +
+  ggtitle('Sexo y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Visualizo las diferentes variables según edad.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(Edad_f, fill = Afectación_MP)) +
+  xlab('Edad') +
+  ylab('Recuento') +
+  ggtitle('Edad y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(Edad_f, fill = Fx_abierta)) +
+  xlab('Edad') +
+  ylab('Recuento') +
+  ggtitle('Edad y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(Edad_f, fill = Alta_energía)) +
+  xlab('Edad') +
+  ylab('Recuento') +
+  ggtitle('Edad y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Visualizo según patrón de fractura tibial.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(AO, fill = Afectación_MP)) +
+  xlab('AO') +
+  ylab('Recuento') +
+  ggtitle('AO y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(AO, fill = Fx_abierta)) +
+  xlab('AO') +
+  ylab('Recuento') +
+  ggtitle('AO y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(AO, fill = Alta_energía)) +
+  xlab('AO') +
+  ylab('Recuento') +
+  ggtitle('AO y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Visualizo las diferentes variables según AO1.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(AO1, fill = Afectación_MP)) +
+  xlab('AO1') +
+  ylab('Recuento') +
+  ggtitle('AO1 y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(AO1, fill = Fx_abierta)) +
+  xlab('AO1') +
+  ylab('Recuento') +
+  ggtitle('AO1 y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(AO1, fill = Alta_energía)) +
+  xlab('AO1') +
+  ylab('Recuento') +
+  ggtitle('AO1 y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Visualizo las diferentes variables según AO2.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(AO2, fill = Afectación_MP)) +
+  xlab('AO2') +
+  ylab('Recuento') +
+  ggtitle('AO2 y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(AO2, fill = Fx_abierta)) +
+  xlab('AO2') +
+  ylab('Recuento') +
+  ggtitle('AO2 y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(AO2, fill = Alta_energía)) +
+  xlab('AO2') +
+  ylab('Recuento') +
+  ggtitle('AO2 y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Visualizo las diferentes variables según AO3.
+```{r, fig.width=10, fig.height=10}
+g1 <- ggplot(data = tibias, aes(AO3, fill = Afectación_MP)) +
+  xlab('AO3') +
+  ylab('Recuento') +
+  ggtitle('AO3 y afectación maléolo posterior') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+g2 <- ggplot(data = tibias, aes(AO3, fill = Fx_abierta)) +
+  xlab('AO3') +
+  ylab('Recuento') +
+  ggtitle('AO3 y fractura abierta') +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_bar()
+
+g3 <- ggplot(data = tibias, aes(AO3, fill = Alta_energía)) +
+  xlab('AO3') +
+  ylab('Recuento') +
+  ggtitle('AO3 y traumatismo de alta energía') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_bar()
+
+grid.arrange(g1, g2, g3)
+```
+
+Examino si hay diferencias significativas entre los grupos de las variables categóricas con respecto a las variables numéricas (Edad) usando la función fun2 (definida a continuación).
+```{r message= FALSE, warning=FALSE}
+variables_categoricas <- c('Sexo', 'AO', 'AO1', 'AO2', 'AO3', 'Fx_abierta', 'Alta_energía', 'Afectación_MP')
+variables_numericas <- c('Edad')
+
+
+fun2 <- function(var_num, var_cat, df = tibias) {
+  level_count <- c()
+  for (i in unique(df[, var_cat])) {
+    level_count <- append(level_count, i)
+  }
+  a <- length(level_count)  # la variable 'a' almacena cuántas clases hay en la categoría.
+  if(a == 2) {
+    b <- wilcox.test(get(var_num) ~ get(var_cat), data = df, exact = FALSE)
+    print(noquote(paste('wilcox.test(', var_num, ' ~ ', var_cat, '): ', 'p.value ', b$p.value, sep = "")))
+  }
+  if(a > 2) {
+    b <- kruskal.test(get(var_num) ~ get(var_cat), data = df)
+    print(noquote(paste('kruskal.test(', var_num, ' ~ ', var_cat, '): ', 'p.value ', b$p.value, sep = "")))
+  }
+}
+
+
+for (i in variables_numericas) {
+  for (j in variables_categoricas) {
+    fun2(i, j)
+  }
+}
+```
+Para Edad sí que hay diferencias entre mujeres y hombres y entre las clases de AO3 (p < 0.05); en el resto de variables categóricas no hay diferencias de Edad entre sus clases.
+
+Estudio la asociación entre variables categóricas.
+
+Incluyo AO. Hay asociación entre AO y Afectación_MP.
+```{r message= FALSE, warning=FALSE}
+variables_categoricas <- c('Sexo', 'AO', 'Fx_abierta', 'Alta_energía', 'Afectación_MP', 'Edad_f')
+comb_cat <- combn(variables_categoricas, 2)
+for (i in 1:ncol(comb_cat)) {
+  tab <- table(unlist(tibias[,comb_cat[,i][1]]), unlist(tibias[,comb_cat[,i][2]]))
+  if(chisq.test(tab)$p.value <= 0.05){
+    cat(paste(comb_cat[,i][1], ' ~ ', comb_cat[,i][2], ':', sep=''))
+    print(chisq.test(tab))
+    cat("\n\n")
+  }
+}
+```
+
+Incluyo AO1. No devuelve resultados: AO1 no se asocia a otras variables categóricas.
+```{r message= FALSE, warning=FALSE}
+variables_categoricas <- c('Sexo', 'AO1', 'Fx_abierta', 'Alta_energía', 'Afectación_MP', 'Edad_f')
+comb_cat <- combn(variables_categoricas, 2)
+for (i in 1:ncol(comb_cat)) {
+  tab <- table(unlist(tibias[,comb_cat[,i][1]]), unlist(tibias[,comb_cat[,i][2]]))
+  if(chisq.test(tab)$p.value <= 0.05){
+    cat(paste(comb_cat[,i][1], ' ~ ', comb_cat[,i][2], ':', sep=''))
+    print(chisq.test(tab))
+    cat("\n\n")
+  }
+}
+```
+
+Incluyo AO2. No devuelve resultados: AO2 no se asocia a otras variables categóricas.
+```{r message= FALSE, warning=FALSE}
+variables_categoricas <- c('Sexo', 'AO2', 'Fx_abierta', 'Alta_energía', 'Afectación_MP', 'Edad_f')
+comb_cat <- combn(variables_categoricas, 2)
+for (i in 1:ncol(comb_cat)) {
+  tab <- table(unlist(tibias[,comb_cat[,i][1]]), unlist(tibias[,comb_cat[,i][2]]))
+  if(chisq.test(tab)$p.value <= 0.05){
+    cat(paste(comb_cat[,i][1], ' ~ ', comb_cat[,i][2], ':', sep=''))
+    print(chisq.test(tab))
+    cat("\n\n")
+  }
+}
+```
+
+Incluyo AO3. Hay asociación entre AO3 ~ Fx_abierta y AO3 ~ Afectación_MP.
+```{r message= FALSE, warning=FALSE}
+variables_categoricas <- c('Sexo', 'AO3', 'Fx_abierta', 'Alta_energía', 'Afectación_MP', 'Edad_f')
+comb_cat <- combn(variables_categoricas, 2)
+for (i in 1:ncol(comb_cat)) {
+  tab <- table(unlist(tibias[,comb_cat[,i][1]]), unlist(tibias[,comb_cat[,i][2]]))
+  if(chisq.test(tab)$p.value <= 0.05){
+    cat(paste(comb_cat[,i][1], ' ~ ', comb_cat[,i][2], ':', sep=''))
+    print(chisq.test(tab))
+    cat("\n\n")
+  }
+}
+```
+
+Para p ≤ 0.05, las variables tienen una asociación estadísticamente significativa (son dependientes, están asociadas), como ocurre entre:
+  - AO ~ Afectación_MP (p-value = 0.008107).
+  - AO3 ~ Fx_abierta (p-value = 0.02313).
+  - AO3 ~ Afectación_MP (p-value = 0.0002117).
+
+Lo muestro gráficamente.
+```{r, fig.height=10, fig.width=10}
+g1 <- ggplot(data = tibias) +
+  labs(title = 'Mosaicplot: Afectación_MP ~ AO') +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_mosaic(aes(x=product(Afectación_MP, AO), fill = Afectación_MP))
+
+g2 <- ggplot(data = tibias) +
+  labs(title = 'Mosaicplot: Fx_abierta ~ AO3') +
+  theme(axis.text=element_text(size=7.5)) +
+  scale_fill_manual(values=c("#00CC33", "#FFFF00", "#FF6666")) +
+  geom_mosaic(aes(x=product(Fx_abierta, AO3), fill = Fx_abierta))
+
+g3 <- ggplot(data = tibias) +
+  labs(title = 'Mosaicplot: Afectación_MP ~ AO3') +
+  scale_fill_manual(values=c("#00CC33", "#FF6666")) +
+  geom_mosaic(aes(x=product(Afectación_MP, AO3), fill = Afectación_MP))
+
+grid.arrange(g1, g2, g3)
+```
+
+Y muestro sus tablas de contingencia.
+```{r message= FALSE, warning=FALSE}
+prop.table(table(tibias$Afectación_MP, tibias$AO), 2)
+```
+
+Para los patrones 42A1, 42B2, 42C2 y 43A1, hay afectación del maléolo posterior en un 51%, 17%, 50% y 50%, respectivamente.
+Para los patrones 41A1, 42A2, 42A3, 42B3 y 42C3 no hay afectación del maléolo posterior.
+
+```{r message= FALSE, warning=FALSE}
+prop.table(table(tibias$Fx_abierta, tibias$AO3), 2)
+```
+
+Para AO3 de tipo 1, un 6% tiene fx abierta grado I.
+Para AO3 de tipo 2, un 6% tiene fx abierta grado I y un 6% tiene fx abierta grado II.
+Para AO3 de tipo 3, un 11% tiene fx abierta grado I y un 21% tiene fx abierta grado II.
+
+```{r message= FALSE, warning=FALSE}
+prop.table(table(tibias$Afectación_MP, tibias$AO3), 2)
+```
+
+Para AO3 de tipo 1, un 49% tiene afectación de maléolo posterior.
+Para AO3 de tipo 2, un 18% tiene afectación de maléolo posterior.
+Para AO3 de tipo 3 no se observa afectación del maléolo posterior.
+
+Entre el resto de variables categóricas no encontramos asociación significativa.
+
+
+
+# Conclusiones
+
+En los datos tratados:
+
+  - Para los patrones 42A1, 42C2 y 43A1, hay afectación del maléolo posterior en un 51%, 50% y 50%, respectivamente.
+
+  - Para AO3 de tipo 3, un 11% tiene fx abierta grado I y un 21% tiene fx abierta grado II.
+
+  - Para AO3 de tipo 1, un 49% tiene afectación de maléolo posterior.
+
+
+Hay asociación estadísticamente significativa entre patrón AO ~ Afectación_MP, AO3 ~ Fx_abierta y AO3 ~ Afectación_MP. Concretamente:
+
+  - Dentro de la variable AO, las clases 42A1, 42B2, 42C2 y 43A1 tienen más afectación del maléolo posterior que el resto.
+  
+  - Dentro de la variable AO3, los tipo 2 y 3 se relacionan más con fractura abierta (grados I y II), siendo superior la incidencia de fractura abierta y su gravedad en el tipo 3.
+  
+  - Dentro de la variable AO3, las clases 1 y 2 tienen más afectación de maléolo posterior, siendo mayor la incidencia de afectación de maléolo posterior en la clase 1.
+
+
+
+# Bibliografía
+
+- https://github.com/tidyverse/readxl/issues/580
+
+- https://www.rdocumentation.org/packages/readxl/versions/0.1.1/topics/read_excel
+
+- https://ggplot2.tidyverse.org/reference/geom_bar.html
+
+- https://www.rdocumentation.org/packages/arules/versions/1.7-3/topics/discretize
+
+- http://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually
+
+- https://stackoverflow.com/questions/18679660/r-chisq-test-with-p-values-na
+
+- https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/table
+
+- https://discuss.analyticsvidhya.com/t/how-to-get-the-proportion-in-table-command-of-r/6741
+
+- https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/prop.table
+
+- https://sphweb.bumc.bu.edu/otlt/MPH-Modules/PH717-QuantCore/PH717-Module6-RandomError/PH717-Module6-RandomError12.html
+
